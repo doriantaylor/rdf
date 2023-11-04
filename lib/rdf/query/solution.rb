@@ -328,6 +328,20 @@ class RDF::Query
     # Equals of solution
     def ==(other)
       other.is_a?(Solution) && @bindings == other.bindings
+      # return false unless other.is_a?(Solution)
+
+      # b1k = @bindings.keys.sort
+      # b2k = other.bindings.keys.sort
+
+      # return false unless b1k == b2k
+
+      # warn @bindings.inspect, other.bindings.inspect
+
+      # pairs = @bindings.values_at(*b1k).zip(other.bindings.values_at(*b2k))
+
+
+
+      # pairs.all? { |pair| pair.first == pair.last }
     end
 
     ##
