@@ -774,11 +774,11 @@ module RDF
     # @see http://www.w3.org/TR/rdf-sparql-query/#func-RDFterm-equal
     def ==(other)
       case other
+      when URI then hash == other.hash && to_s == other.to_s
+      when String then to_s == other
       when Literal
         # If other is a Literal, reverse test to consolodate complex type checking logic
         other == self
-      when String then to_s == other
-      when URI then hash == other.hash && to_s == other.to_s
       else other.respond_to?(:to_uri) && to_s == other.to_uri.to_s
       end
     end
