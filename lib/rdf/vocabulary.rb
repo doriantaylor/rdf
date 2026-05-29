@@ -40,10 +40,10 @@ module RDF
   #   foaf['mbox']  #=> RDF::URI("http://xmlns.com/foaf/0.1/mbox")
   #
   # @example Defining a simple vocabulary
-  #   EX = Class.new(RDF::StrictVocabulay("http://example/ns#")) do
+  #   EX = Class.new(RDF::StrictVocabulary("http://example/ns#")) do
   #     # Ontology definition
   #     ontology :"http://example/ns#",
-  #       label: "The RDF Example Vocablary",
+  #       label: "The RDF Example Vocabulary",
   #       type: "http://www.w3.org/2002/07/owl#Ontology"
   #
   #     # Class definitions
@@ -63,7 +63,7 @@ module RDF
   #       isDefinedBy: %(ex:),
   #       type: "rdf:Property"
   #   end
-  # 
+  #
   # @example Method calls are converted to the typical RDF camelcase convention
   #   foaf = RDF::Vocabulary.new("http://xmlns.com/foaf/0.1/")
   #   foaf.family_name    #=> RDF::URI("http://xmlns.com/foaf/0.1/familyName")
@@ -92,14 +92,18 @@ module RDF
       # @return [Enumerator]
       def each(&block)
         if self.equal?(Vocabulary)
+          # these are the limited vocabs
           if instance_variable_defined?(:@vocabs) && @vocabs
+            # not sure why we select
             @vocabs.select(&:name).each(&block)
           else
             # This is needed since all vocabulary classes are defined using
             # Ruby's autoloading facility, meaning that `@@subclasses` will be
             # empty until each subclass has been touched or require'd.
-            RDF::VOCABS.each { |v, p| RDF.const_get(p[:class_name].to_sym) unless v == :rdf }
-            @@subclasses.select(&:name).each(&block)
+            RDF::VOCABS.each do |v, p|
+              RDF.const_get(p[:class_name].to_sym) unless v == :rdf
+            end
+            @@subclasses.values.flatten(1).select(&:name).uniq.each(&block)
           end
         else
           __properties__.each(&block)
@@ -178,15 +182,15 @@ module RDF
       # @return [Array<RDF::Vocabulary>]
       def limit_vocabs(*vocabs)
         @vocabs = if Array(vocabs).empty?
-          nil
-        else
-          vocabs.map do |vocab|
-            vocab = :rdfv if vocab == :rdf
-            vocab.is_a?(Symbol) && RDF::VOCABS.key?(vocab) ?
-              RDF.const_get(RDF::VOCABS[vocab][:class_name].to_sym) :
-              vocab
-          end.compact
-        end
+                    nil
+                  else
+                    vocabs.map do |vocab|
+                      vocab = :rdfv if vocab == :rdf
+                      vocab.is_a?(Symbol) && RDF::VOCABS.key?(vocab) ?
+                        RDF.const_get(RDF::VOCABS[vocab][:class_name].to_sym) :
+                        vocab
+                    end.compact
+                  end
       end
 
       ##
@@ -368,7 +372,55 @@ module RDF
       # @return [Vocabulary]
       def find(uri)
         uri = RDF::URI(uri) if uri.is_a?(String)
-        return nil unless uri.uri? && uri.valid?
+        return unless uri.uri? && uri.valid?
+
+        # try various versions of the URI that will yield a vocab
+        trials = [uri.to_s.dup]
+        if uri.fragment
+          tmp = uri.dup
+          ['', nil].each do |x|
+            tmp.fragment = x
+            trials << tmp.to_s.dup
+          end
+        elsif !uri.query && m = %r{^(/(?:.+/)?)([^/]+)$}.match(uri.path)
+          tmp = uri.dup
+          [m.captures.first, m.captures.first[0..-1]].each do |x|
+            tmp.path = x
+            trials << tmp.to_s.dup
+          end
+        end
+
+        vocabs = if instance_variable_defined?(:@vocabs) && @vocabs
+                   # XXX HACK to populate subclasses
+                   RDF::Vocabulary.to_a if
+                     @@subclasses.except(RDF::RDFV.to_s).empty?
+
+                   @vocabs.each_with_object({}) do |v, h|
+                     (h[v.to_s] ||= []) << v
+                   end
+                 else
+                   # XXX HACK to populate subclasses
+                   RDF::Vocabulary.to_a if
+                     @@subclasses.except(RDF::RDFV.to_s).empty?
+
+                   # otherwise use everything
+                   RDF::VOCABS.map do |sym, params|
+                     [params[:uri], [RDF.const_get(params[:class_name])]]
+                   end.to_h.merge @@subclasses
+                 end
+
+        # warn vocabs.inspect if @vocabs
+
+        if key = trials.detect { |u| vocabs.key? u }
+          out = vocabs[key].first
+          # warn "#{key} (#{uri}) => #{out}"
+          return out if key == uri.to_s || uri.start_with?(key) ||
+            v.to_uri.to_s.sub(%r([/#]$), '') == uri.to_s
+        end
+
+        # warn trials.inspect
+
+        # if we don't fall back to this then some tests fail
         RDF::Vocabulary.detect do |v|
           if uri.length >= v.to_uri.length
             uri.start_with?(v.to_uri)
@@ -386,7 +438,10 @@ module RDF
       # @return [Vocabulary::Term]
       def find_term(uri)
         uri = RDF::URI(uri)
+
+        # bail out if this is interned already
         return uri if uri.is_a?(Vocabulary::Term)
+
         if vocab = find(uri)
           if vocab.ontology == uri
             vocab.ontology
@@ -418,10 +473,10 @@ module RDF
       def imports
         return [] unless self.ontology
         @imports ||= begin
-          Array(self.ontology.properties[:"http://www.w3.org/2002/07/owl#imports"]).compact
-        rescue KeyError
-          []
-        end
+                       Array(self.ontology.properties[:"http://www.w3.org/2002/07/owl#imports"]).compact
+                     rescue KeyError
+                       []
+                     end
       end
       alias_method :__imports__, :imports
 
@@ -430,8 +485,8 @@ module RDF
       # @return [Array<RDF::Vocabulary>]
       def imported_from
         @imported_from ||= begin
-          RDF::Vocabulary.select {|v| v.__imports__.include?(self)}
-        end
+                             RDF::Vocabulary.select {|v| v.__imports__.include?(self)}
+                           end
       end
 
       ##
@@ -494,15 +549,15 @@ module RDF
       # @return [RDF::Vocabulary] the loaded vocabulary
       def from_graph(graph, url: nil, class_name: nil, extra: nil)
         vocab = case class_name
-        when RDF::Vocabulary
-          class_name.instance_variable_set(:@ontology, nil)
-          class_name.instance_variable_set(:@properties, nil)
-          class_name
-        when String
-          Object.const_set(class_name, Class.new(self.create(url)))
-        else
-          Class.new(self.create(url))
-        end
+                when RDF::Vocabulary
+                  class_name.instance_variable_set(:@ontology, nil)
+                  class_name.instance_variable_set(:@properties, nil)
+                  class_name
+                when String
+                  Object.const_set(class_name, Class.new(self.create(url)))
+                else
+                  Class.new(self.create(url))
+                end
 
         ont_url = url.to_s.sub(%r([/#]$), '')
         term_defs = {}
@@ -526,13 +581,13 @@ module RDF
 
         # Create extra terms
         term_defs = case extra
-        when Array
-          extra.inject({}) {|memo, s| memo[s.to_sym] = {}; memo}.merge(term_defs)
-        when Hash
-          extra.merge(term_defs)
-        else
-          term_defs
-        end
+                    when Array
+                      extra.inject({}) {|memo, s| memo[s.to_sym] = {}; memo}.merge(term_defs)
+                    when Hash
+                      extra.merge(term_defs)
+                    else
+                      term_defs
+                    end
 
         # Pass over embedded_defs with anonymous references, once
         embedded_defs.each do |term, attributes|
@@ -560,19 +615,19 @@ module RDF
           # Turn embedded BNodes into either their Term definition or a List
           attributes.each do |ak, avs|
             attributes[ak] = avs.is_a?(Array) ? (avs.map do |av|
-              l = RDF::List.new(subject: av, graph: graph)
-              if l.valid?
-                RDF::List.new(subject: av) do |nl|
-                  l.each do |lv|
-                    nl << (embedded_defs[lv] ? Term.new(vocab: vocab, attributes: embedded_defs[lv]) : lv)
-                  end
-                end
-              elsif av.is_a?(RDF::Node)
-                Term.new(vocab: vocab, attributes: embedded_defs[av]) if embedded_defs[av]
-              else
-                av
-              end
-            end).compact : avs
+                                                   l = RDF::List.new(subject: av, graph: graph)
+                                                   if l.valid?
+                                                     RDF::List.new(subject: av) do |nl|
+                                                       l.each do |lv|
+                                                         nl << (embedded_defs[lv] ? Term.new(vocab: vocab, attributes: embedded_defs[lv]) : lv)
+                                                       end
+                                                     end
+                                                   elsif av.is_a?(RDF::Node)
+                                                     Term.new(vocab: vocab, attributes: embedded_defs[av]) if embedded_defs[av]
+                                                   else
+                                                     av
+                                                   end
+                                                 end).compact : avs
           end
 
           if term == :""
@@ -629,10 +684,17 @@ module RDF
         @__prefix__
       end
 
-    protected
+      protected
+
+      # THIS IS HOW NEW VOCABS FIND THEIR WAY INTO THE INDEX.
+      #
       def inherited(subclass) # @private
         unless @@uri.nil?
-          @@subclasses << subclass unless %w(http://www.w3.org/1999/02/22-rdf-syntax-ns#).include?(@@uri)
+          unless %w(http://www.w3.org/1999/02/22-rdf-syntax-ns#).include?(@@uri)
+            sc = @@subclasses[@@uri.dup.freeze] ||= []
+            sc << subclass unless sc.include? subclass
+          end
+
           subclass.send(:private_class_method, :new)
           @@uris[subclass] = @@uri
           @@uri = nil
@@ -656,25 +718,25 @@ module RDF
       def list(*values)
         RDF::List[*values.map {|v| expand_pname(v) rescue RDF::Literal(v)}]
       end
-    private
+      private
 
       def props; @properties ||= {}; end
     end
 
     # Undefine all superfluous instance methods:
     undef_method(*instance_methods.
-                  map(&:to_s).
-                  select {|m| m.match?(/^\w+$/)}.
-                  reject {|m| %w(object_id dup instance_eval inspect to_s class send public_send).include?(m) || m[0,2] == '__'}.
-                  map(&:to_sym))
+                 map(&:to_s).
+                 select {|m| m.match?(/^\w+$/)}.
+                 reject {|m| %w(object_id dup instance_eval inspect to_s class send public_send).include?(m) || m[0,2] == '__'}.
+                 map(&:to_sym))
 
     ##
     # @param  [RDF::URI, String, #to_s] uri
     def initialize(uri)
       @uri = case uri
-        when RDF::URI then uri.to_s
-        else RDF::URI.parse(uri.to_s) ? uri.to_s : nil
-      end
+             when RDF::URI then uri.to_s
+             else RDF::URI.parse(uri.to_s) ? uri.to_s : nil
+             end
     end
 
     ##
@@ -713,7 +775,7 @@ module RDF
       sprintf("#<%s:%#0x(%s)>", self.class.name, __id__, to_s)
     end
 
-  protected
+    protected
 
     def self.create(uri) # @private
       @@uri = uri
@@ -737,9 +799,11 @@ module RDF
       end.join
     end
 
-  private
+    private
 
-    @@subclasses = [::RDF] # @private
+    @@subclasses = {
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#'.freeze => [::RDF]
+    } # @private
     @@uris       = {}      # @private
     @@uri        = nil     # @private
 
@@ -949,35 +1013,35 @@ module RDF
       #     Options from {URI#initialize}
       def self.new(*args, vocab: nil, attributes: {}, **options)
         klass = if args.first.nil?
-          RDF::Node
-        elsif args.first.is_a?(Hash)
-          args.unshift(nil)
-          RDF::Node
-        elsif args.first.to_s.start_with?("_:")
-          args = args[1..-1].unshift($1)
-          RDF::Node
-        else RDF::URI
-        end
+                  RDF::Node
+                elsif args.first.is_a?(Hash)
+                  args.unshift(nil)
+                  RDF::Node
+                elsif args.first.to_s.start_with?("_:")
+                  args = args[1..-1].unshift($1)
+                  RDF::Node
+                else RDF::URI
+                end
 
         # Create default proc on attributes to allow lookup by different key types.
         attributes = attributes.dup if attributes.frozen?
         attributes.default_proc = -> (hash, key) do
           sym = case key
-          when RDF::URI
-            URI_ATTRs.fetch(key, key.to_s.to_sym)
-          when String
-            URI_ATTRs.fetch(RDF::URI(key), key.to_s.to_sym)
-          when Symbol
-            case key.to_s
-            when /^https?:/
-              # Lookup by associated attribute, or pname
-              URI_ATTRs.fetch(RDF::URI(key.to_s), RDF::URI(key).pname.to_sym)
-            when /:/
-              uri = RDF::Vocabulary.expand_pname(key)
-              # Lookup by associated attribute or URI
-              URI_ATTRs.fetch(uri, uri.to_s.to_sym)
-            end
-          end
+                when RDF::URI
+                  URI_ATTRs.fetch(key, key.to_s.to_sym)
+                when String
+                  URI_ATTRs.fetch(RDF::URI(key), key.to_s.to_sym)
+                when Symbol
+                  case key.to_s
+                  when /^https?:/
+                    # Lookup by associated attribute, or pname
+                    URI_ATTRs.fetch(RDF::URI(key.to_s), RDF::URI(key).pname.to_sym)
+                  when /:/
+                    uri = RDF::Vocabulary.expand_pname(key)
+                    # Lookup by associated attribute or URI
+                    URI_ATTRs.fetch(uri, uri.to_s.to_sym)
+                  end
+                end
           hash.fetch(sym, nil)
         end
 
@@ -1117,35 +1181,35 @@ module RDF
           value = (RDF::Vocabulary.expand_pname(v) rescue nil) if v.is_a?(String) && v.include?(':')
           value = value.to_uri if value.respond_to?(:to_uri)
           value = if value.is_a?(RDF::Value) && value.valid?
-            value
-          elsif value.is_a?(Hash)
-            # type/language map
-            value.inject([]) do |memo, (k,v)|
-              vv = [v] unless v.is_a?(Array)
-              memo << if k.to_s.include?(':')
-                dt = RDF::Vocabulary.expand_pname(v) rescue nil
-                vv.map {|val| RDF::Literal(val, datatype: dt)}
-              else
-                vv.map {|val| RDF::Literal(val, language: k)}
-              end
-            end.flatten.compact.select(&:valid?)
-          else
-            # Use as most appropriate literal
-            [
-              RDF::Literal::Date,
-              RDF::Literal::DateTime,
-              RDF::Literal::Integer,
-              RDF::Literal::Decimal,
-              RDF::Literal::Double,
-              RDF::Literal::Boolean,
-              RDF::Literal
-            ].inject(nil) do |m, klass|
-              m || begin
-                l = klass.new(v)
-                l if l.valid?
-              end
-            end
-          end
+                    value
+                  elsif value.is_a?(Hash)
+                    # type/language map
+                    value.inject([]) do |memo, (k,v)|
+                      vv = [v] unless v.is_a?(Array)
+                      memo << if k.to_s.include?(':')
+                                dt = RDF::Vocabulary.expand_pname(v) rescue nil
+                                vv.map {|val| RDF::Literal(val, datatype: dt)}
+                              else
+                                vv.map {|val| RDF::Literal(val, language: k)}
+                              end
+                    end.flatten.compact.select(&:valid?)
+                  else
+                    # Use as most appropriate literal
+                    [
+                      RDF::Literal::Date,
+                      RDF::Literal::DateTime,
+                      RDF::Literal::Integer,
+                      RDF::Literal::Decimal,
+                      RDF::Literal::Double,
+                      RDF::Literal::Boolean,
+                      RDF::Literal
+                    ].inject(nil) do |m, klass|
+                      m || begin
+                             l = klass.new(v)
+                             l if l.valid?
+                           end
+                    end
+                  end
         end.flatten
 
         prop_values.length <= 1 ? prop_values.first : prop_values
@@ -1199,17 +1263,17 @@ module RDF
       def respond_to?(method, include_all = false)
         case method
         when :comment, :notation, :note, :editorialNote, :definition,
-             :label, :altLabel, :prefLabel, :type, :isDefinedBy
+            :label, :altLabel, :prefLabel, :type, :isDefinedBy
           true
         when :subClassOf, :subPropertyOf,
-             :domainIncludes, :rangeIncludes,
-             :equivalentClass, :intersectionOf, :unionOf
+            :domainIncludes, :rangeIncludes,
+            :equivalentClass, :intersectionOf, :unionOf
           self.class?
         when :domain, :range, :equivalentProperty, :inverseOf
           self.property?
         when :allValuesFrom, :cardinality,
-             :maxCardinality, :minCardinality,
-             :onProperty, :someValuesFrom
+            :maxCardinality, :minCardinality,
+            :onProperty, :someValuesFrom
           self.restriction?
         when :broader, :exactMatch, :hasTopConcept, :inScheme, :member, :narrower, :related
           @attributes.key?(method)
@@ -1237,39 +1301,39 @@ module RDF
       # @return [String]
       def to_ruby(indent: "")
         "term(" +
-        (self.uri? ? self.to_s.inspect + ",\n" : "\n") +
-        "#{indent}  " +
-        attributes.keys.sort.map do |k|
-          values = attribute_value(k)
-          values = [values].compact unless values.is_a?(Array)
-          values = values.map do |value|
-            if value.is_a?(Literal) && %w(: comment definition notation note editorialNote).include?(k.to_s)
-              "%(#{value.to_s.gsub('(', '\(').gsub(')', '\)')})"
-            elsif value.node? && value.is_a?(RDF::Vocabulary::Term)
-              "#{value.to_ruby(indent: indent + "  ")}"
-            elsif value.is_a?(RDF::Term)
-              "#{value.to_s.inspect}"
-            elsif value.is_a?(RDF::List)
-              list_elements = value.map do |u|
-                if u.uri?
-                  "#{u.to_s.inspect}"
-                elsif u.node? && u.respond_to?(:to_ruby)
-                  u.to_ruby(indent: indent + "  ")
-                else
-                  "#{u.to_s.inspect}"
+          (self.uri? ? self.to_s.inspect + ",\n" : "\n") +
+          "#{indent}  " +
+          attributes.keys.sort.map do |k|
+            values = attribute_value(k)
+            values = [values].compact unless values.is_a?(Array)
+            values = values.map do |value|
+              if value.is_a?(Literal) && %w(: comment definition notation note editorialNote).include?(k.to_s)
+                "%(#{value.to_s.gsub('(', '\(').gsub(')', '\)')})"
+              elsif value.node? && value.is_a?(RDF::Vocabulary::Term)
+                "#{value.to_ruby(indent: indent + "  ")}"
+              elsif value.is_a?(RDF::Term)
+                "#{value.to_s.inspect}"
+              elsif value.is_a?(RDF::List)
+                list_elements = value.map do |u|
+                  if u.uri?
+                    "#{u.to_s.inspect}"
+                  elsif u.node? && u.respond_to?(:to_ruby)
+                    u.to_ruby(indent: indent + "  ")
+                  else
+                    "#{u.to_s.inspect}"
+                  end
                 end
+                "list(#{list_elements.join(', ')})"
+              else
+                "#{value.inspect}"
               end
-              "list(#{list_elements.join(', ')})"
-            else
-              "#{value.inspect}"
             end
-          end
-          "#{k.to_s.include?(':') ? k.to_s.inspect : k}: " +
-          (values.length == 1 ? values.first : ('[' + values.join(',') + ']'))
-        end.join(",\n#{indent}  ") + "\n#{indent})"
+            "#{k.to_s.include?(':') ? k.to_s.inspect : k}: " +
+              (values.length == 1 ? values.first : ('[' + values.join(',') + ']'))
+          end.join(",\n#{indent}  ") + "\n#{indent})"
 
       end
-    protected
+      protected
       # Implement accessor to symbol attributes
       def method_missing(method, *args, &block)
         case method
@@ -1283,11 +1347,11 @@ module RDF
             to_s.split(/[\/\#]/).last
           end
         when :type, :subClassOf, :subPropertyOf, :domain, :range, :isDefinedBy,
-             :allValuesFrom, :cardinality, :equivalentClass, :equivalentProperty,
-             :imports, :intersectionOf, :inverseOf, :maxCardinality, :minCardinality,
-             :onProperty, :someValuesFrom, :unionOf,
-             :domainIncludes, :rangeIncludes,
-             :broader, :exactMatch, :hasTopConcept, :inScheme, :member, :narrower, :related
+            :allValuesFrom, :cardinality, :equivalentClass, :equivalentProperty,
+            :imports, :intersectionOf, :inverseOf, :maxCardinality, :minCardinality,
+            :onProperty, :someValuesFrom, :unionOf,
+            :domainIncludes, :rangeIncludes,
+            :broader, :exactMatch, :hasTopConcept, :inScheme, :member, :narrower, :related
 
           # Return value as an Array, unless it is a list
           case value = attribute_value(method)
